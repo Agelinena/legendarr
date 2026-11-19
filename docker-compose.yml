@@ -1,0 +1,144 @@
+# Legendarr: legendas em português para a biblioteca do Radarr e do Sonarr.
+# Guia: README.md.
+#
+#   web        painel (legendas por filme/episódio, traduções, logs). SEM
+#              LOGIN: publique só atrás de um proxy com autenticação.
+#   worker     varre a biblioteca, pede legendas ao Bazarr, sincroniza, traduz
+#              com IA local (Ollama) o que faltar, confere o áudio original e
+#              remove downloads travados no Radarr/Sonarr.
+#   optimizer  converte para HEVC (NVENC na GPU NVIDIA; x265 se falhar) os
+#              vídeos que ainda não são HEVC, para ocupar menos espaço.
+#
+# O worker e o web falam com o Bazarr, o Radarr, o Sonarr e o Ollama pelos
+# endereços do .env. Se eles estiverem em containers, ponha o Legendarr na
+# mesma rede Docker (exemplo no README).
+#
+# Dados (padrão ./data, ajuste no .env): fila e estatísticas em
+# ${APPDATA_PATH}/legendarr; temporários do optimizer em
+# ${CACHE_PATH}/legendarr/optimizer. Mídia em ${MEDIA_PATH}/filmes e
+# ${MEDIA_PATH}/series (as mesmas pastas do Radarr e do Sonarr).
+
+services:
+  web:
+    build: ./web
+    container_name: legendarr-web
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - BAZARR_URL=${BAZARR_URL:-http://bazarr:6767}
+      - BAZARR_API_KEY=${BAZARR_API_KEY}
+      - BAZARR_LANGUAGE=${BAZARR_LANGUAGE:-pb}
+    volumes:
+      - ${MEDIA_PATH:?defina no .env}/filmes:/media/filmes
+      - ${MEDIA_PATH:?defina no .env}/series:/media/series
+      - ${APPDATA_PATH:-./data}/legendarr/jobs:/app/jobs
+      - ${APPDATA_PATH:-./data}/legendarr/stats:/app/stats
+    ports:
+      - "${WEB_PORT:-8080}:8000"
+    networks:
+      - legendarr
+
+  worker:
+    build: ./worker
+    container_name: legendarr-worker
+    restart: unless-stopped
+    volumes:
+      - ${MEDIA_PATH:?defina no .env}/filmes:/media/filmes
+      - ${MEDIA_PATH:?defina no .env}/series:/media/series
+      - ${APPDATA_PATH:-./data}/legendarr/jobs:/app/jobs
+      - ${APPDATA_PATH:-./data}/legendarr/stats:/app/stats
+    environment:
+      # Tradução 100% local pelo Ollama (sem APIs externas).
+      - LOCAL_AI_URL=${LOCAL_AI_URL:-http://ollama:11434}
+      - TRANSLATOR_MODEL=${TRANSLATOR_MODEL:-translategemma:4b}
+      - OLLAMA_NUM_CTX=${OLLAMA_NUM_CTX:-8192}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-600}
+      - TRANSLATOR_TEMPERATURE=${TRANSLATOR_TEMPERATURE:-0.2}
+      - BLOCK_RETRANSLATE_ROUNDS=${BLOCK_RETRANSLATE_ROUNDS:-3}
+      - TRANSLATE_BATCH_BLOCKS=${TRANSLATE_BATCH_BLOCKS:-60}
+      - TRANSLATION_MIN_BLOCK_COVERAGE=${TRANSLATION_MIN_BLOCK_COVERAGE:-0.90}
+      # Rótulo da faixa no Jellyfin para legendas geradas por IA (ex.: "Português - AI").
+      # Legendas do Bazarr não recebem rótulo. Evite "IA" (colide com Interlingua); vazio = desliga.
+      - AI_SUBTITLE_LABEL=${AI_SUBTITLE_LABEL:-AI}
+      # Refino de sincronia por conteúdo (embeddings bge-m3): off | audit | fix
+      - SUBTITLE_REFINE=${SUBTITLE_REFINE:-audit}
+      - REFINE_EMBED_MODEL=${REFINE_EMBED_MODEL:-bge-m3}
+      - REFINE_EMBED_KEEP_ALIVE=${REFINE_EMBED_KEEP_ALIVE:-2m}
+      - REFINE_WINDOW_SECONDS=${REFINE_WINDOW_SECONDS:-12}
+      - REFINE_TOLERANCE_SECONDS=${REFINE_TOLERANCE_SECONDS:-0.25}
+      - REFINE_MIN_MATCH=${REFINE_MIN_MATCH:-0.6}
+      - REFINE_MAX_CPS=${REFINE_MAX_CPS:-17}
+      - SCAN_INTERVAL=${SCAN_INTERVAL:-3600}
+      # Espera (s) sem alterações antes de processar uma legenda PT recém-criada
+      - SUBTITLE_WATCH_DEBOUNCE=${SUBTITLE_WATCH_DEBOUNCE:-3}
+      # Limites (s) do mapa temporal do sync antes de rejeitá-lo
+      - ALIGNMENT_MAX_AVERAGE_DELTA=${ALIGNMENT_MAX_AVERAGE_DELTA:-8}
+      - ALIGNMENT_MAX_DELTA=${ALIGNMENT_MAX_DELTA:-60}
+      # Cooldown progressivo de legendas: revisita a cada RETRY_INTERVAL_HOURS;
+      # após MAX_FAST_RETRIES falhas, recua para COOLDOWN_HOURS (3 dias)
+      - RETRY_INTERVAL_HOURS=${RETRY_INTERVAL_HOURS:-1}
+      - MAX_FAST_RETRIES=${MAX_FAST_RETRIES:-6}
+      - COOLDOWN_HOURS=${COOLDOWN_HOURS:-72}
+      - BAZARR_URL=${BAZARR_URL:-http://bazarr:6767}
+      - BAZARR_API_KEY=${BAZARR_API_KEY}
+      - BAZARR_LANGUAGE=${BAZARR_LANGUAGE:-pb}
+      - BAZARR_WAIT_SECONDS=${BAZARR_WAIT_SECONDS:-120}
+      # Acompanhamento do job assíncrono de sincronização do Bazarr
+      - BAZARR_SYNC_TIMEOUT=${BAZARR_SYNC_TIMEOUT:-900}
+      - BAZARR_SYNC_POLL_SECONDS=${BAZARR_SYNC_POLL_SECONDS:-10}
+      - BAZARR_SYNC_DISCOVERY_SECONDS=${BAZARR_SYNC_DISCOVERY_SECONDS:-20}
+      # Verificador de áudio (idioma original) — deleta+rebaixa via Radarr/Sonarr
+      - RADARR_URL=${RADARR_URL:-http://radarr:7878}
+      - RADARR_API_KEY=${RADARR_API_KEY}
+      - SONARR_URL=${SONARR_URL:-http://sonarr:8989}
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - AUDIO_CHECK_STRICT=${AUDIO_CHECK_STRICT:-false}
+      - MAX_REDOWNLOAD_ATTEMPTS=${MAX_REDOWNLOAD_ATTEMPTS:-5}
+      - AUDIO_KEEP_TAG=${AUDIO_KEEP_TAG:-keep-audio}
+      # Duração mínima (% do runtime do Arr) para o arquivo não ser tratado como cortado
+      - MIN_DURATION_PERCENT=${MIN_DURATION_PERCENT:-80}
+      # Auditoria de legendas: cobertura mínima (último timestamp ÷ duração) p/ não ser incompleta
+      - SUBTITLE_MIN_COVERAGE=${SUBTITLE_MIN_COVERAGE:-0.85}
+      # Remove downloads travados (stalled) no Radarr/Sonarr após N minutos e rebaixa
+      - STALLED_TIMEOUT_MINUTES=${STALLED_TIMEOUT_MINUTES:-20}
+      - STALLED_CHECK_INTERVAL=${STALLED_CHECK_INTERVAL:-60}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    networks:
+      - legendarr
+
+  optimizer:
+    build: ./optimizer
+    container_name: optimizer
+    restart: unless-stopped
+    volumes:
+      - ${MEDIA_PATH:?defina no .env}/filmes:/media/filmes
+      - ${MEDIA_PATH:?defina no .env}/series:/media/series
+      - ${APPDATA_PATH:-./data}/legendarr/stats:/app/stats
+      - ${CACHE_PATH:-./data/cache}/legendarr/optimizer:/app/temp
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    networks:
+      - legendarr
+
+networks:
+  legendarr:
+    name: legendarr

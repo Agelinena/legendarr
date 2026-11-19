@@ -1,0 +1,42 @@
+# Legendarr — testes do worker e do painel a cada push, e o build das imagens.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  testes:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        servico: [worker, web]
+    defaults:
+      run:
+        working-directory: ${{ matrix.servico }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Dependências
+        run: python -m pip install -r requirements.txt pytest
+      - name: Testes
+        run: python -m pytest tests -q
+
+  imagens:
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        servico: [worker, web, optimizer]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t legendarr-${{ matrix.servico }} ${{ matrix.servico }}
