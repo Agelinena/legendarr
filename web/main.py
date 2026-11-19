@@ -26,10 +26,12 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 MEDIA_ROOT = "/media"
-JOBS_DIR = "/app/jobs"
-STATS_FILE = "/app/stats/stats.json"
-TRANSLATION_STATS_FILE = "/app/stats/translation_stats.json"
-WORKER_LOG_FILE = "/app/stats/worker.log"
+# Pasta dos volumes jobs/ e stats/ (no container, /app). Os testes trocam.
+APP_DIR = os.environ.get("LEGENDARR_APP_DIR", "/app")
+JOBS_DIR = f"{APP_DIR}/jobs"
+STATS_FILE = f"{APP_DIR}/stats/stats.json"
+TRANSLATION_STATS_FILE = f"{APP_DIR}/stats/translation_stats.json"
+WORKER_LOG_FILE = f"{APP_DIR}/stats/worker.log"
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 
